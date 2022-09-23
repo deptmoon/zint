@@ -31,20 +31,44 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: "${CI_FUZZ_API_TOKEN}", variable: 'CI_FUZZ_API_TOKEN')]) {
           sh '''
-            CI_FUZZ_INSTALL_DIR="$HOME/cifuzz"
+            CI_FUZZ_INSTALL_DIR="$HOME/ci-fuzz"
             CI_BUILD=${CI_FUZZ_INSTALL_DIR}/bin/ci-build
             CICTL=${CI_FUZZ_INSTALL_DIR}/bin/cictl
 
+            ### Check that required commands are available
+            JQ="${WORKSPACE}/jq"
+            JQ_URL=https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
+            JQ_CHECKSUM=af986793a515d500ab2d35f8d2aecd656e764504b789b66d7e1a0b727a124c44
+
+            # Check if jq already exists
+            if [ -f "${JQ}" ]; then
+              # The file already exists. Verify the checksum.
+              if ! echo "${JQ_CHECKSUM}" "${JQ}" | sha256sum --check; then
+                # The checksum of the existing file does not match. Download
+                # it again.
+                curl -L "${JQ_URL}" -o "${JQ}"
+              fi
+            else
+              # The file does not exist yet, download it
+              curl -L "${JQ_URL}" -o "${JQ}"
+            fi
+
+            # Verify the checksum
+            echo "${JQ_CHECKSUM}" "${JQ}" | sha256sum --check
+
+            # Make it executable
+            chmod +x "${JQ}"
+
             ### Download CI Fuzz Build Tools
-            CIBUILD_VERSION=$(${CI_BUILD} --version | grep -o -P '\\d+\\.\\d+\\.\\d+') || true
+            CI_BUILD_VERSION=$(${CI_BUILD} --version | grep -o -P '\\d+\\.\\d+\\.\\d+') || true
             if [ -n "${CI_BUILD_TOOLS_VERSION_OVERRIDE}" ]; then
               CI_FUZZ_SERVER_VERSION="${CI_BUILD_TOOLS_VERSION_OVERRIDE}"
             else
-              CI_FUZZ_SERVER_VERSION=$(curl "${WEB_APP_ADDRESS}/v1/version" | grep -o -P '\\d+\\.\\d+\\.\\d+') \
+              CI_FUZZ_SERVER_VERSION=$(curl "${WEB_APP_ADDRESS}/v1/version" | ${JQ} -r ".version") \
                 || ( echo "Problem getting CI Fuzz server version, cannot download/update CI Fuzz build tools!" ; false )
             fi
 
-            if [ "${CIBUILD_VERSION}" != "${CI_FUZZ_SERVER_VERSION}" ]; then
+            if [ "${CI_BUILD_VERSION}" != "${CI_FUZZ_SERVER_VERSION}" ]; then
               INSTALLER=ci-fuzz-build-tools-installer-${CI_FUZZ_SERVER_VERSION}-linux
               curl "https://s3.eu-central-1.amazonaws.com/public.code-intelligence.com/releases/${INSTALLER}" -s -o ${INSTALLER}
               chmod +x ${INSTALLER}
@@ -57,7 +81,7 @@ pipeline {
             echo "${CI_FUZZ_API_TOKEN}" | ${CICTL_CMD} login --quiet
 
             ### Build Artifact
-            ARTIFACT_LOCATION=${HOME}/zint-fuzzers.tar.gz
+            ARTIFACT_LOCATION=${HOME}/fuzzers.tar.gz
             ${CI_BUILD} fuzzers -o ${ARTIFACT_LOCATION}
 
             ### Import Artifact
@@ -90,44 +114,23 @@ pipeline {
         if [ -d "${BUILD_TAG}" ]; then
           cd "${BUILD_TAG}"
         else
-          # There isn't a work dir, most likely the fuzzing step failed before creating it
+          # There is no work dir, most likely the fuzzing step failed before creating it
           exit 0
         fi
 
         # Check if there are any findings
         if ! stat -t finding-*.json > /dev/null 2>&1; then
-          # There are no findings, so there's nothing to do
+          # There are no findings, so there is nothing to do
          exit 0
         fi
 
-        JQ="${WORKSPACE}/jq"
-        JQ_URL=https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
-        JQ_CHECKSUM=af986793a515d500ab2d35f8d2aecd656e764504b789b66d7e1a0b727a124c44
-
-        # Check if jq already exists
-        if [ -f "${JQ}" ]; then
-          # The file already exists. Verify the checksum.
-          if ! echo "${JQ_CHECKSUM}" "${JQ}" | sha256sum --check; then
-            # The checksum of the existing file doesn't match. Download
-            # it again.
-            curl -L "${JQ_URL}" -o "${JQ}"
-          fi
-        else
-          # The file doesn't exist yet, download it
-          curl -L "${JQ_URL}" -o "${JQ}"
-        fi
-
-        # Verify the checksum
-        echo "${JQ_CHECKSUM}" "${JQ}" | sha256sum --check
-
-        # Make it executable
-        chmod +x "${JQ}"
 
         # Merge findings into one file
-        "${JQ}" --slurp '.' finding-*.json > cifuzz_findings.json
+        JQ="${WORKSPACE}/jq"
+        "${JQ}" --slurp '.' finding-*.json > ci_fuzz_findings.json
       '''
 
-      archiveArtifacts artifacts: "${BUILD_TAG}/cifuzz_findings.json", fingerprint: true
+      archiveArtifacts artifacts: "${BUILD_TAG}/ci_fuzz_findings.json", fingerprint: true
     }
   }
 }
